@@ -20,6 +20,8 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+          # Включаем поддержку наших merge-стратегий из .gitattributes
+          git config merge.ours.driver true
       
       - name: Add upstream and fetch
         run: |
@@ -45,17 +47,53 @@ jobs:
             echo "needs_update=true" >> $GITHUB_OUTPUT
           fi
       
-      - name: Merge upstream
+      - name: Rebase on upstream
         if: steps.check.outputs.needs_update == 'true'
         env:
           UPSTREAM_COMMIT: ${{ steps.check.outputs.upstream_commit }}
         run: |
-          git merge upstream/main -m "Sync with upstream
+          echo "Starting rebase on upstream..."
           
-          Upstream commit: ${UPSTREAM_COMMIT}"
+          # Rebase: наши коммиты будут поверх upstream
+          # -X ours: при конфликтах выбираем наши изменения
+          # .gitattributes: папка .github всегда сохраняет нашу версию
+          if git rebase upstream/main -X ours; then
+            echo "Rebase successful"
+          else
+            echo "Rebase conflicts detected, resolving with ours strategy..."
+            # Разрешаем все конфликты в пользу наших изменений
+            while git diff --name-only --diff-filter=U | grep -q .; do
+              git checkout --ours .
+              git add .
+            done
+            git rebase --continue
+          fi
+      
+      - name: Verify .github folder is intact
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "Checking protected files..."
+          if [ -d ".github" ]; then
+            echo "✓ .github folder preserved"
+            ls -la .github/workflows/
+          else
+            echo "✗ .github folder missing! Restoring..."
+            git checkout HEAD~1 -- .github
+            git commit -m "Restore .github folder after rebase"
+          fi
+      
+      - name: Show changes
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "Changes after rebase:"
+          git diff --stat upstream/main..HEAD
       
       - name: Push changes
         if: steps.check.outputs.needs_update == 'true'
+        env:
+          UPSTREAM_COMMIT: ${{ steps.check.outputs.upstream_commit }}
         run: |
-          git push origin main
+          # Принудительный пуш нужен после rebase (история переписана)
+          git push origin main --force-with-lease
           echo "Synced successfully!"
+          echo "Upstream: ${UPSTREAM_COMMIT}"

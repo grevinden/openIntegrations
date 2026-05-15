@@ -1,9 +1,10 @@
-name: Full Auto-Update Pipeline
+name: Sync Upstream and Filter
 
 on:
   push:
     branches:
       - main
+      - master
   schedule:
     - cron: '0 3 * * *'  # Каждый день в 3:00 UTC
   workflow_dispatch:
@@ -14,84 +15,83 @@ on:
         default: 'src/addins/commons src/addins/check_vulnerabilities.bat'
 
 jobs:
-  update-filtered-fork:
+  sync-and-filter:
     runs-on: ubuntu-latest
-    outputs:
-      commit_hash: ${{ steps.push.outputs.commit_hash }}
     
     steps:
-      - name: Clone source repository
-        run: |
-          git clone https://github.com/Bayselonarrend/OpenIntegrations.git source-repo
-      
-      - name: Install git-filter-repo
-        run: pip install git-filter-repo
-      
-      - name: Filter repository
-        run: |
-          cd source-repo
-          
-          # Преобразуем пути в аргументы --path
-          PATHS="${{ github.event.inputs.filter_paths || 'src/addins/commons src/addins/check_vulnerabilities.bat' }}"
-          ARGS=""
-          for p in $PATHS; do
-            ARGS="$ARGS --path $p"
-          done
-          
-          echo "Filter args: $ARGS"
-          git filter-repo $ARGS --force
-      
-      - name: Push to FILTER_REPO
-        id: push
-        env:
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
-        run: |
-          cd source-repo
-          git remote add origin https://oauth2:${GIT_TOKEN}@github.com/grevinden/openIntegrations-commons-filtered.git
-          git push -u origin main --force
-          
-          COMMIT_HASH=$(git rev-parse HEAD)
-          echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
-          echo "Pushed commit: ${COMMIT_HASH}"
-  
-  update-small-repo:
-    needs: update-filtered-fork
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout SMALL_REPO
+      - name: Checkout current repository
         uses: actions/checkout@v4
         with:
-          repository: grevinden/openIntegrations-commons
+          fetch-depth: 0
           token: ${{ secrets.GIT_TOKEN }}
-          submodules: true
       
       - name: Configure Git
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "bot@github.com"
       
-      - name: Update submodule
-        env:
-          SOURCE_COMMIT: ${{ needs.update-filtered-fork.outputs.commit_hash }}
-          EVENT_NAME: ${{ github.event_name }}
+      - name: Sync with upstream
         run: |
-          git submodule update --init --remote vendor/OpenIntegrations
+          # Добавляем upstream если ещё нет
+          git remote add upstream https://github.com/Bayselonarrend/OpenIntegrations.git 2>/dev/null || true
           
-          if git diff --cached --quiet && git diff --quiet; then
-            echo "No changes detected"
-          else
-            git add vendor/OpenIntegrations
-            
-            # Формируем сообщение коммита
-            cat > /tmp/commit_msg.txt << EOF
-          Auto-update submodule
+          # Получаем изменения из upstream
+          git fetch upstream
           
-          Source commit: ${SOURCE_COMMIT}
-          Filter: src/addins/commons src/addins/check_vulnerabilities.bat
-          Triggered by: ${EVENT_NAME}
-          EOF
-            
-            git commit -F /tmp/commit_msg.txt
-            git push origin main
-            echo "Submodule updated successfully!"
-          fi
+          # Определяем текущую ветку
+          BRANCH=$(git branch --show-current)
+          
+          # Мержим изменения из upstream
+          git merge upstream/main --allow-unrelated-histories -m "Sync with upstream" || {
+            echo "Merge conflict! Please resolve manually."
+            exit 1
+          }
+          
+          # Пушим обновлённую ветку
+          git push origin $BRANCH
+      
+      - name: Install git-filter-repo
+        run: pip install git-filter-repo
+      
+      - name: Filter and push to FILTER_REPO
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FILTER_PATHS: ${{ github.event.inputs.filter_paths || 'src/addins/commons src/addins/check_vulnerabilities.bat' }}
+        run: |
+          # Создаём временную папку для фильтрации
+          TEMP_DIR=$(mktemp -d)
+          cp -r . "$TEMP_DIR/filtered"
+          cd "$TEMP_DIR/filtered"
+          
+          # Преобразуем пути в аргументы --path
+          ARGS=""
+          for p in $FILTER_PATHS; do
+            ARGS="$ARGS --path $p"
+          done
+          
+          echo "Filtering with: $ARGS"
+          git filter-repo $ARGS --force
+          
+          # Пушим в FILTER_REPO
+          git remote add origin https://oauth2:${GIT_TOKEN}@github.com/grevinden/openIntegrations-commons-filtered.git
+          git push -u origin main --force
+          
+          echo "commit_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          
+          # Очистка
+          cd /
+          rm -rf "$TEMP_DIR"
+      
+      - name: Update submodule in dependent repos (опционально)
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+        run: |
+          # Здесь можно добавить уведомление другим репозиториям
+          echo "FILTER_REPO updated successfully!"
+          
+          # Пример: триггерим обновление в другом репо
+          # curl -X POST \
+          #   https://api.github.com/repos/grevinden/another-project/dispatches \
+          #   -H "Authorization: token ${GIT_TOKEN}" \
+          #   -H "Accept: application/vnd.github.v3+json" \
+          #   -d '{"event_type":"update-submodule"}'

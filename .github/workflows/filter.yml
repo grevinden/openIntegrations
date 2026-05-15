@@ -1,4 +1,4 @@
-name: Filter and Update Fork
+name: Filter and Push to Commons
 
 on:
   push:
@@ -16,36 +16,47 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout
+      - name: Checkout source (this repo)
         uses: actions/checkout@v4
         with:
+          path: source
           fetch-depth: 0
+      
+      - name: Checkout target (filtered repo)
+        uses: actions/checkout@v4
+        with:
+          repository: grevinden/openIntegrations-commons-filtered
+          token: ${{ secrets.GIT_TOKEN }}
+          path: target
       
       - name: Install git-filter-repo
         run: pip install git-filter-repo
       
-      - name: Filter and push
+      - name: Filter and copy to target
         env:
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FILTER_PATHS: ${{ github.event.inputs.filter_paths || 'src/addins/commons src/addins/check_vulnerabilities.bat' }}
         run: |
-          # Получаем пути из input или используем дефолтные
-          PATHS="${{ github.event.inputs.filter_paths || 'src/addins/commons src/addins/check_vulnerabilities.bat' }}"
+          cd source
           
-          # Формируем аргументы
+          # Формируем аргументы для filter-repo
           ARGS=""
-          for p in $PATHS; do
+          for p in $FILTER_PATHS; do
             ARGS="$ARGS --path $p"
           done
           
-          # Фильтруем в копии
-          TEMP_DIR=$(mktemp -d)
-          cp -r "$GITHUB_WORKSPACE" "$TEMP_DIR/filtered"
-          cd "$TEMP_DIR/filtered"
+          echo "Filtering with: $ARGS"
           
-          git filter-repo $ARGS --force
+          # Фильтруем и отправляем в target
+          git filter-repo $ARGS --force --target ../target
+      
+      - name: Push to FILTER_REPO
+        run: |
+          cd target
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
           
-          # Пушим
-          git remote add origin https://oauth2:${GIT_TOKEN}@github.com/grevinden/openIntegrations-commons-filtered.git
-          git push -u origin main --force
+          echo "Changes to push:"
+          git log --oneline -5
           
-          echo "Done! Commit: $(git rev-parse HEAD)"
+          git push origin main --force
+          echo "Done!"
